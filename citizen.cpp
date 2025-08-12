@@ -904,15 +904,21 @@ int CNPC_Citizen::CountNPCsUsingProp(CBaseEntity* pProp)
 	int count = 0;
 	CBaseEntity* pEntity = NULL;
 
-	// Buscar todas as entidades num raio da prop
-	for (CEntitySphereQuery sphere(pProp->GetAbsOrigin(), 600.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
+	// Search for all entities within prop radius
+	for (CEntitySphereQuery sphere(pProp->GetAbsOrigin(), 300.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
 	{
-		// Tentar converter para Alyx
+		// Try to convert to Citizen
 		CNPC_Citizen* pCitizen = dynamic_cast<CNPC_Citizen*>(pEntity);
 		if (!pCitizen || pCitizen == this) // Não contar a si mesmo
 			continue;
 
-		// Verificar se está usando a mesma prop
+		// CRASH PREVENTION: Skip dead/dying NPCs to avoid race conditions during cover search
+		// This prevents crashes when NPCs die exactly during timer-triggered cover calculations
+		// Double validation ensures maximum safety against timing-critical scenarios
+		if (pCitizen->GetHealth() <= 0 || !pCitizen->IsAlive())
+			continue;
+
+		// Check if using the same prop
 		if (pCitizen->m_hLowCoverProp == pProp || pCitizen->m_hHighCoverProp == pProp)
 		{
 			count++;
@@ -1380,7 +1386,10 @@ void CNPC_Citizen::GatherConditions()
 		}
 
 		// Check if enemy is too close to current props
-		Vector enemyPos = GetEnemy()->GetAbsOrigin();
+		CBaseEntity* pEnemy = GetEnemy();
+		if (!pEnemy) return; // CRASH PREVENTION: Validate enemy exists
+
+		Vector enemyPos = pEnemy->GetAbsOrigin();
 		const float MIN_COVER_DISTANCE = 150.0f;
 		bool enemyTooClose = (m_hLowCoverProp && enemyPos.DistTo(m_hLowCoverProp->GetAbsOrigin()) < MIN_COVER_DISTANCE) ||
 			(m_hHighCoverProp && enemyPos.DistTo(m_hHighCoverProp->WorldSpaceCenter()) < MIN_COVER_DISTANCE);
@@ -1405,7 +1414,7 @@ void CNPC_Citizen::GatherConditions()
 				for (CEntitySphereQuery sphere(m_hLowCoverProp->GetAbsOrigin(), 100.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
 				{
 					CAI_BaseNPC* pNPC = dynamic_cast<CAI_BaseNPC*>(pEntity);
-					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Enemy NPC
+					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Check for enemy relationship
 					{
 						enemyNPCNearCover = true;
 						break;
@@ -1439,7 +1448,7 @@ void CNPC_Citizen::GatherConditions()
 				for (CEntitySphereQuery sphere(m_hHighCoverProp->WorldSpaceCenter(), 100.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
 				{
 					CAI_BaseNPC* pNPC = dynamic_cast<CAI_BaseNPC*>(pEntity);
-					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Enemy NPC
+					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Check for enemy relationship
 					{
 						enemyNPCNearCover = true;
 						break;
