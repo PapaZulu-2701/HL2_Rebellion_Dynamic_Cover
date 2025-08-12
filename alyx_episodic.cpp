@@ -780,11 +780,18 @@ int CNPC_Alyx::CountNPCsUsingProp(CBaseEntity* pProp)
 	CBaseEntity* pEntity = NULL;
 
 	// Buscar todas as entidades num raio da prop
-	for (CEntitySphereQuery sphere(pProp->GetAbsOrigin(), 600.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
+	for (CEntitySphereQuery sphere(pProp->GetAbsOrigin(), 300.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
 	{
 		// Tentar converter para Alyx
 		CNPC_Alyx* pAlyx = dynamic_cast<CNPC_Alyx*>(pEntity);
 		if (!pAlyx || pAlyx == this) // Não contar a si mesmo
+			continue;
+
+
+		// CRASH PREVENTION: Skip dead/dying NPCs to avoid race conditions during cover search
+		// This prevents crashes when NPCs die exactly during timer-triggered cover calculations
+		// Double validation ensures maximum safety against timing-critical scenarios
+		if (pAlyx->GetHealth() <= 0 || !pAlyx->IsAlive())
 			continue;
 
 		// Verificar se está usando a mesma prop
@@ -1127,19 +1134,77 @@ void CNPC_Alyx::GatherConditions()
 			// Don't search for new props, but continue validating current ones below
 		}
 
-		// Check if enemy is too close to current props
-		Vector enemyPos = GetEnemy()->GetAbsOrigin();
+		// Check if ANY enemies (player + NPCs) are too close to current props
+		CBaseEntity* pEnemy = GetEnemy();
+		if (!pEnemy) return; // CRASH PREVENTION: Validate enemy exists
+
+		Vector enemyPos = pEnemy->GetAbsOrigin();
 		const float MIN_COVER_DISTANCE = 150.0f;
-		bool enemyTooClose = (m_hLowCoverProp && enemyPos.DistTo(m_hLowCoverProp->GetAbsOrigin()) < MIN_COVER_DISTANCE) ||
-			(m_hHighCoverProp && enemyPos.DistTo(m_hHighCoverProp->WorldSpaceCenter()) < MIN_COVER_DISTANCE);
+
+		// Check player distance + enemy NPCs in one unified check
+		bool enemyTooClose = false;
+
+		// LOW COVER enemy proximity check
+		if (m_hLowCoverProp)
+		{
+			// Player too close?
+			if (enemyPos.DistTo(m_hLowCoverProp->GetAbsOrigin()) < MIN_COVER_DISTANCE)
+			{
+				enemyTooClose = true;
+				Msg("[DEBUG] Player enemy too close to LOW COVER\n");
+			}
+
+			// Enemy NPCs too close?
+			if (!enemyTooClose)
+			{
+				CBaseEntity* pEntity = NULL;
+				for (CEntitySphereQuery sphere(m_hLowCoverProp->GetAbsOrigin(), MIN_COVER_DISTANCE); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
+				{
+					CAI_BaseNPC* pNPC = dynamic_cast<CAI_BaseNPC*>(pEntity);
+					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Enemy relationship
+					{
+						enemyTooClose = true;
+						Msg("[DEBUG] Enemy NPC too close to LOW COVER\n");
+						break;
+					}
+				}
+			}
+		}
+
+		// HIGH COVER enemy proximity check
+		if (!enemyTooClose && m_hHighCoverProp)
+		{
+			// Player too close?
+			if (enemyPos.DistTo(m_hHighCoverProp->WorldSpaceCenter()) < MIN_COVER_DISTANCE)
+			{
+				enemyTooClose = true;
+				Msg("[DEBUG] Player enemy too close to HIGH COVER\n");
+			}
+
+			// Enemy NPCs too close?
+			if (!enemyTooClose)
+			{
+				CBaseEntity* pEntity = NULL;
+				for (CEntitySphereQuery sphere(m_hHighCoverProp->WorldSpaceCenter(), MIN_COVER_DISTANCE); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
+				{
+					CAI_BaseNPC* pNPC = dynamic_cast<CAI_BaseNPC*>(pEntity);
+					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Enemy relationship
+					{
+						enemyTooClose = true;
+						Msg("[DEBUG] Enemy NPC too close to HIGH COVER\n");
+						break;
+					}
+				}
+			}
+		}
 
 		if (enemyTooClose)
 		{
-			Msg("[DEBUG] GatherConditions: Enemy too close to current props\n");
+			Msg("[DEBUG] GatherConditions: Enemies too close to current props\n");
 		}
 		else
 		{
-			// Validate LOW COVER
+			// Validate LOW COVER (only navigation check needed now)
 			if (m_hLowCoverProp)
 			{
 				Vector enemyToProp = m_hLowCoverProp->GetAbsOrigin() - enemyPos;
@@ -1147,20 +1212,7 @@ void CNPC_Alyx::GatherConditions()
 				enemyToProp.z = 0;
 				Vector testPos = m_hLowCoverProp->GetAbsOrigin() + (enemyToProp * 80.0f);
 
-				// Check if enemy NPCs are near this cover
-				bool enemyNPCNearCover = false;
-				CBaseEntity* pEntity = NULL;
-				for (CEntitySphereQuery sphere(m_hLowCoverProp->GetAbsOrigin(), 100.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
-				{
-					CAI_BaseNPC* pNPC = dynamic_cast<CAI_BaseNPC*>(pEntity);
-					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Enemy NPC
-					{
-						enemyNPCNearCover = true;
-						break;
-					}
-				}
-
-				if (!enemyNPCNearCover && GetNavigator()->CanFitAtPosition(testPos, MASK_NPCSOLID))
+				if (GetNavigator()->CanFitAtPosition(testPos, MASK_NPCSOLID))
 				{
 					SetCondition(COND_ALYX_HAS_LOW_COVER);
 					Msg("[DEBUG] GatherConditions: LOW COVER valid and navigable\n");
@@ -1168,12 +1220,11 @@ void CNPC_Alyx::GatherConditions()
 				else
 				{
 					m_hLowCoverProp = NULL;
-					Msg("[DEBUG] GatherConditions: LOW COVER discarded - %s\n",
-						enemyNPCNearCover ? "enemy nearby" : "not navigable");
+					Msg("[DEBUG] GatherConditions: LOW COVER discarded - not navigable\n");
 				}
 			}
 
-			// Validate HIGH COVER
+			// Validate HIGH COVER (only navigation check needed now)
 			if (m_hHighCoverProp)
 			{
 				Vector enemyToProp = m_hHighCoverProp->WorldSpaceCenter() - enemyPos;
@@ -1181,20 +1232,7 @@ void CNPC_Alyx::GatherConditions()
 				enemyToProp.z = 0;
 				Vector testPos = m_hHighCoverProp->WorldSpaceCenter() + (enemyToProp * 80.0f);
 
-				// Check if enemy NPCs are near this cover
-				bool enemyNPCNearCover = false;
-				CBaseEntity* pEntity = NULL;
-				for (CEntitySphereQuery sphere(m_hHighCoverProp->WorldSpaceCenter(), 100.0f); (pEntity = sphere.GetCurrentEntity()) != NULL; sphere.NextEntity())
-				{
-					CAI_BaseNPC* pNPC = dynamic_cast<CAI_BaseNPC*>(pEntity);
-					if (pNPC && pNPC != this && IRelationType(pNPC) == D_HT) // Enemy NPC
-					{
-						enemyNPCNearCover = true;
-						break;
-					}
-				}
-
-				if (!enemyNPCNearCover && GetNavigator()->CanFitAtPosition(testPos, MASK_NPCSOLID))
+				if (GetNavigator()->CanFitAtPosition(testPos, MASK_NPCSOLID))
 				{
 					SetCondition(COND_ALYX_HAS_HIGH_COVER);
 					Msg("[DEBUG] GatherConditions: HIGH COVER valid and navigable\n");
@@ -1202,8 +1240,7 @@ void CNPC_Alyx::GatherConditions()
 				else
 				{
 					m_hHighCoverProp = NULL;
-					Msg("[DEBUG] GatherConditions: HIGH COVER discarded - %s\n",
-						enemyNPCNearCover ? "enemy nearby" : "not navigable");
+					Msg("[DEBUG] GatherConditions: HIGH COVER discarded - not navigable\n");
 				}
 			}
 		}
